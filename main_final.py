@@ -1,16 +1,31 @@
-# ========== aiogram 启动提醒、掉线重启、/status ==========
-from aiogram import Bot as AioBot, Dispatcher, types
-from aiogram.utils import executor
-import asyncio
 import os
 import time
+import asyncio
+import logging
+import sqlite3
+import random
+from threading import Thread
+from datetime import datetime
+from flask import Flask, request
+import telebot
+from telebot.types import (
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
+from apscheduler.schedulers.background import BackgroundScheduler
+from aiogram import Bot as AioBot, Dispatcher, types
+from aiogram.utils import executor
 
-API_TOKEN = os.getenv("BOT_TOKEN", "你的AiogramToken")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "1149975148"))
+# ───── 环境变量 ─────────────────────────────────
+TOKEN = os.getenv("TOKEN")                       # Telegram Bot Token (同一份，用于 aiogram + telebot)
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))  # 管理员 Chat ID
+PORT = int(os.getenv("PORT", 5000))              # Flask 端口
+WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL_BASE", "").rstrip("/")
+WEBHOOK_PATH = "/webhook"
 
-aiobot = AioBot(token=API_TOKEN)
+# ───── aiogram 部分：启动通知 + 掉线重启 + /status ─────
+aiobot = AioBot(token=TOKEN)
 dp = Dispatcher(aiobot)
-
 last_heartbeat = time.time()
 
 async def on_startup(_):
@@ -39,26 +54,13 @@ async def watchdog():
 async def status_handler(message: types.Message):
     await message.reply("✅ 桃奈酱机器人当前在线。")
 
-
-# ========== Flask + Telebot 主体 ==========
-import logging
-import sqlite3
-from datetime import datetime
-from flask import Flask, request
-import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from apscheduler.schedulers.background import BackgroundScheduler
-
-TOKEN = os.getenv("TOKEN", "你的TelebotToken")
-PORT = int(os.getenv("PORT", 5000))
-WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL_BASE", "").rstrip("/")
-WEBHOOK_PATH = "/webhook"
-
+# ───── Flask + Telebot 部分 ─────────────────────────
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-logging.basicConfig(filename='bot.log', level=logging.INFO)
+logging.basicConfig(level=logging.INFO, filename="bot.log")
 
+# SQLite 用户记录
 conn = sqlite3.connect("users.db", check_same_thread=False)
 c = conn.cursor()
 c.execute('''
@@ -72,6 +74,7 @@ CREATE TABLE IF NOT EXISTS users(
 ''')
 conn.commit()
 
+# 双向传话会话管理
 forward_sessions = {}
 session_timestamp = {}
 SESSION_TIMEOUT = 300
@@ -118,18 +121,28 @@ def record_message(msg):
     except Exception:
         logging.exception("record_message error")
 
+# ───── /start 欢迎语 ─────────────────────────────
 @bot.message_handler(commands=['start'])
 def on_start(msg):
     try:
         record_message(msg)
         cid = msg.chat.id
-        bot.send_message(cid, "每次你点我都会湿成小猫，快来试试我的湿身中文包♡", reply_markup=get_main_menu(cid))
+        bot.send_message(
+            cid,
+            "每次你点我都会湿成小猫，快来试试我的湿身中文包♡",
+            reply_markup=get_main_menu(cid)
+        )
         link_kb = InlineKeyboardMarkup()
         link_kb.add(InlineKeyboardButton("🐾 桃奈语", url="https://t.me/setlanguage/zhcncc"))
-        bot.send_message(cid, "点下面的「🐾 桃奈语」立即切换到【桃奈湿身语】", reply_markup=link_kb)
+        bot.send_message(
+            cid,
+            "点下面的「🐾 桃奈语」立即切换到【桃奈湿身语】",
+            reply_markup=link_kb
+        )
     except Exception:
         logging.exception("on_start error")
 
+# ───── 文本消息处理 ─────────────────────────────
 @bot.message_handler(func=lambda m: True, content_types=['text'])
 def on_text(msg):
     try:
@@ -165,16 +178,18 @@ def on_text(msg):
             forward_sessions[cid] = ADMIN_CHAT_ID
             forward_sessions[ADMIN_CHAT_ID] = cid
             session_timestamp[cid] = session_timestamp[ADMIN_CHAT_ID] = now
-            bot.send_message(ADMIN_CHAT_ID, f"来自 @{msg.from_user.username or msg.from_user.first_name} 的传话：{text}",
-                             reply_markup=exit_keyboard())
+            bot.send_message(
+                ADMIN_CHAT_ID,
+                f"来自 @{msg.from_user.username or msg.from_user.first_name} 的传话：{text}",
+                reply_markup=exit_keyboard()
+            )
             bot.send_message(cid, "✅ 已发送，进入双向传话模式，点击「退出双向传话」结束。", reply_markup=get_main_menu(cid))
             return
 
         if state and state != "PENDING":
             partner = state
             session_timestamp[cid] = session_timestamp[partner] = now
-            bot.send_message(partner, f"来自 @{msg.from_user.username or msg.from_user.first_name} 的传话：{text}",
-                             reply_markup=exit_keyboard())
+            bot.send_message(partner, f"来自 @{msg.from_user.username or msg.from_user.first_name} 的传话：{text}", reply_markup=exit_keyboard())
             return
 
         bot.send_message(cid, "🐾 未识别指令，请从菜单选择", reply_markup=get_main_menu(cid))
@@ -208,25 +223,7 @@ def webhook():
         logging.exception("webhook error")
     return "", 200
 
-# ========== 启动 Flask 与 aiogram ==========
-if __name__ == "__main__":
-    bot.remove_webhook()
-    if WEBHOOK_URL_BASE:
-        url = WEBHOOK_URL_BASE + WEBHOOK_PATH
-        bot.set_webhook(url=url)
-        logging.info(f"✅ Webhook 已设置: {url}")
-    else:
-        logging.warning("⚠️ 未设置 Webhook URL，跳过")
-
-    from threading import Thread
-    Thread(target=lambda: executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)).start()
-
-    app.run(host="0.0.0.0", port=PORT)
-
-# ========== 百家乐游戏 ==========
-import random
-from telebot.types import Message
-
+# ───── 百家乐游戏 ─────────────────────────────
 user_data = {}
 
 def deal_cards():
@@ -255,14 +252,9 @@ def check_super_six(banker, winner):
 
 def parse_bets(text: str):
     bet_map = {
-        "闲": "player",
-        "庄": "banker",
-        "和": "tie",
-        "庄对": "banker_pair",
-        "闲对": "player_pair",
-        "超6": "super_six",
-        "大": "big",
-        "小": "small"
+        "闲": "player", "庄": "banker", "和": "tie",
+        "庄对": "banker_pair", "闲对": "player_pair",
+        "超6": "super_six", "大": "big", "小": "small"
     }
     bets = {}
     parts = text.replace("/baccarat", "").strip().split()
@@ -274,33 +266,28 @@ def parse_bets(text: str):
                     if amount > 0:
                         bets[en] = amount
                 except:
-                    continue
+                    pass
     return bets
 
 @bot.message_handler(commands=['balance'])
-def show_balance(message: Message):
+def show_balance(message):
     uid = message.from_user.id
     if uid not in user_data:
         user_data[uid] = {"balance": 1000, "username": message.from_user.username or ""}
-    balance = user_data[uid]["balance"]
-    bot.reply_to(message, f"你的余额为：💰{balance}")
+    bot.reply_to(message, f"你的余额为：💰{user_data[uid]['balance']}")
 
 @bot.message_handler(commands=['add'])
-def add_balance(message: Message):
-    from config import ADMIN_CHAT_ID
+def add_balance(message):
     if str(message.from_user.id) != str(ADMIN_CHAT_ID):
         return
     try:
         parts = message.text.split()
-        if len(parts) != 3:
-            bot.reply_to(message, "格式错误，应为 /add @用户名 金额")
-            return
         mention = message.entities[1]
-        username = message.text[mention.offset:mention.offset + mention.length][1:]
+        username = message.text[mention.offset:mention.offset+mention.length][1:]
         amount = int(parts[-1])
-        for uid in user_data:
-            if user_data[uid].get("username") == username:
-                user_data[uid]['balance'] += amount
+        for uid, info in user_data.items():
+            if info.get("username") == username:
+                user_data[uid]["balance"] += amount
                 bot.reply_to(message, f"已增加 {username} 的余额 {amount} 💰")
                 return
         bot.reply_to(message, f"未找到用户 {username}")
@@ -308,61 +295,76 @@ def add_balance(message: Message):
         bot.reply_to(message, f"发生错误：{e}")
 
 @bot.message_handler(commands=['baccarat'])
-def baccarat_game(message: Message):
+def baccarat_game(message):
     uid = message.from_user.id
-    username = message.from_user.username or ""
     if uid not in user_data:
-        user_data[uid] = {"balance": 1000, "username": username}
-    try:
-        bets = parse_bets(message.text)
-        if not bets:
-            bot.reply_to(message, "请使用格式如：/baccarat 闲100 超620 庄对30")
-            return
-        total_bet = sum(bets.values())
-        if total_bet > user_data[uid]["balance"]:
-            bot.reply_to(message, "余额不足～")
-            return
-        player, banker = deal_cards()
-        result = baccarat_result(player, banker)
-        payout = 0
-        result_text = f"🎴发牌：\n闲：{player}（{sum(player)%10}点）\n庄：{banker}（{sum(banker)%10}点）\n结果：{result.upper()}\n"
-        super6_win, super6_rate = check_super_six(banker, result)
-        for key, amount in bets.items():
-            win = False
-            gain = 0
-            if key == "player" and result == "player":
-                win = True
-                gain = amount
-            elif key == "banker" and result == "banker":
-                win = True
-                gain = int(amount * 0.95)
-            elif key == "tie" and result == "tie":
-                win = True
-                gain = amount * 8
-            elif key == "player_pair" and player[0] == player[1]:
-                win = True
-                gain = amount * 11
-            elif key == "banker_pair" and banker[0] == banker[1]:
-                win = True
-                gain = amount * 11
-            elif key == "super_six" and super6_win:
-                win = True
-                gain = amount * super6_rate
-            elif key == "big" and len(player + banker) in [5, 6]:
-                win = True
-                gain = amount * 0.54
-            elif key == "small" and len(player + banker) == 4:
-                win = True
-                gain = amount * 1.5
-            if win:
-                payout += int(gain) + amount
-                result_text += f"✅ 赢了下注[{key}]，获得💰{int(gain)}\n"
-            else:
-                result_text += f"❌ 输了下注[{key}]\n"
-        user_data[uid]["balance"] -= total_bet
-        user_data[uid]["balance"] += payout
-        result_text += f"\n当前余额：💰{user_data[uid]['balance']}"
-        bot.reply_to(message, result_text)
-    except Exception as e:
-        bot.reply_to(message, f"发生错误：{e}")
-    
+        user_data[uid] = {"balance": 1000, "username": message.from_user.username or ""}
+    bets = parse_bets(message.text)
+    if not bets:
+        bot.reply_to(message, "请使用格式如：/baccarat 闲100 超620 庄对30")
+        return
+    total_bet = sum(bets.values())
+    if total_bet > user_data[uid]["balance"]:
+        bot.reply_to(message, "余额不足～")
+        return
+
+    player, banker = deal_cards()
+    result = baccarat_result(player, banker)
+    super6_win, super6_rate = check_super_six(banker, result)
+
+    payout = 0
+    result_text = (f"🎴 发牌：\n"
+                   f"闲：{player}（{sum(player)%10} 点）\n"
+                   f"庄：{banker}（{sum(banker)%10} 点）\n"
+                   f"结果：{result.upper()}\n")
+
+    for key, amount in bets.items():
+        win, gain = False, 0
+        if key == "player" and result == "player":
+            win, gain = True, amount
+        elif key == "banker" and result == "banker":
+            win, gain = True, int(amount * 0.95)
+        elif key == "tie" and result == "tie":
+            win, gain = True, amount * 8
+        elif key == "player_pair" and player[0] == player[1]:
+            win, gain = True, amount * 11
+        elif key == "banker_pair" and banker[0] == banker[1]:
+            win, gain = True, amount * 11
+        elif key == "super_six" and super6_win:
+            win, gain = True, amount * super6_rate
+        elif key == "big" and len(player+banker) in (5,6):
+            win, gain = True, amount * 0.54
+        elif key == "small" and len(player+banker) == 4:
+            win, gain = True, amount * 1.5
+
+        if win:
+            payout += int(gain) + amount
+            result_text += f"✅ 赢了 [{key}] 获得 💰{int(gain)}\n"
+        else:
+            result_text += f"❌ 输了 [{key}]\n"
+
+    user_data[uid]["balance"] -= total_bet
+    user_data[uid]["balance"] += payout
+    result_text += f"\n当前余额：💰{user_data[uid]['balance']}"
+    bot.reply_to(message, result_text)
+
+# ───── 多线程并行启动 aiogram + telebot + Flask ─────
+def start_aiogram():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
+
+def start_telebot():
+    bot.polling(none_stop=True)
+
+if __name__ == "__main__":
+    bot.remove_webhook()
+    if WEBHOOK_URL_BASE:
+        bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_PATH)
+        logging.info(f"Webhook 已设置: {WEBHOOK_URL_BASE + WEBHOOK_PATH}")
+    else:
+        logging.info("未设置 WEBHOOK_URL_BASE，使用轮询模式")
+
+    Thread(target=start_aiogram, daemon=True).start()
+    Thread(target=start_telebot, daemon=True).start()
+    app.run(host="0.0.0.0", port=PORT)
