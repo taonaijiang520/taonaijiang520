@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: taonaijiang
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: python main_final.py
+    envVars:
+      - key: TOKEN
+        value: 你的BotToken
+      - key: ADMIN_CHAT_ID
+        value: "1149975148"
+      - key: PORT
+        value: "5000"
