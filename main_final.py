@@ -223,6 +223,7 @@ if __name__ == "__main__":
 
     app.run(host="0.0.0.0", port=PORT)
 
+# ========== 百家乐游戏 ==========
 import random
 from telebot.types import Message
 
@@ -364,12 +365,4 @@ def baccarat_game(message: Message):
         bot.reply_to(message, result_text)
     except Exception as e:
         bot.reply_to(message, f"发生错误：{e}")
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    chat_id = message.chat.id
-    try:
-        with open("welcome.mp4", "rb") as video:
-            bot.send_video(chat_id, video, caption="欢迎来到桃奈酱的世界♡")
-    except Exception as e:
-        bot.send_message(chat_id, "欢迎视频发送失败了，桃奈酱哭哭：{}".format(e))
+    
